@@ -1,0 +1,449 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>오늘도 출근이다</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; user-select: none; }
+        body {
+            background-color: #111;
+            color: #fff;
+            font-family: 'Courier New', Courier, monospace;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            min-height: 100vh;
+            overflow: hidden;
+        }
+        #game-container {
+            position: relative;
+            width: 360px;
+            height: 640px;
+            background: #000;
+            border: 4px solid #555;
+            box-shadow: 0 0 20px rgba(255,255,255,0.1);
+            display: flex;
+            flex-direction: column;
+        }
+        /* CRT 스캔라인 연출 */
+        #game-container::after {
+            content: " ";
+            display: block;
+            position: absolute;
+            top: 0; left: 0; bottom: 0; right: 0;
+            background: linear-gradient(rgba(18, 16, 16, 0) 50%, rgba(0, 0, 0, 0.25) 50%);
+            background-size: 100% 4px;
+            z-index: 10;
+            pointer-events: none;
+        }
+        canvas {
+            width: 100%;
+            height: 480px;
+            background-color: #000;
+            image-rendering: pixelated;
+        }
+        #ui-panel {
+            height: 160px;
+            background: #222;
+            border-top: 2px solid #555;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            gap: 8px;
+            padding: 8px;
+            z-index: 20;
+        }
+        .d-pad {
+            display: grid;
+            grid-template-columns: repeat(3, 48px);
+            grid-template-rows: repeat(2, 40px);
+            gap: 4px;
+        }
+        .btn {
+            background: #333;
+            color: #fff;
+            border: 2px solid #777;
+            border-radius: 6px;
+            font-weight: bold;
+            font-size: 16px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            cursor: pointer;
+        }
+        .btn:active { background: #666; transform: scale(0.95); }
+        .btn-action {
+            grid-column: span 3;
+            background: #d9534f;
+            border-color: #ff7777;
+            font-size: 15px;
+            color: #fff;
+        }
+    </style>
+</head>
+<body>
+
+<div id="game-container">
+    <canvas id="gameCanvas" width="360" height="480"></canvas>
+
+    <div id="ui-panel">
+        <div class="d-pad">
+            <button class="btn" id="btn-left">◀</button>
+            <button class="btn" id="btn-up">▲</button>
+            <button class="btn" id="btn-right">▶</button>
+            <button class="btn" id="btn-down" style="grid-column: 2;">▼</button>
+            <button class="btn btn-action" id="btn-action">START / ACTION</button>
+        </div>
+    </div>
+</div>
+
+<script>
+const canvas = document.getElementById('gameCanvas');
+const ctx = canvas.getContext('2d');
+
+// 타이틀 이미지 로드 (같은 폴더의 image_e1d2e0.png 참조)
+const titleImg = new Image();
+let isImgLoaded = false;
+titleImg.src = 'image_e1d2e0.png';
+titleImg.onload = () => { isImgLoaded = true; };
+
+// Web Audio API
+let audioCtx = null;
+function playSound(freq, duration, type='square') {
+    if (!audioCtx) return;
+    try {
+        const osc = audioCtx.createOscillator();
+        const gain = audioCtx.createGain();
+        osc.type = type;
+        osc.frequency.setValueAtTime(freq, audioCtx.currentTime);
+        gain.gain.setValueAtTime(0.1, audioCtx.currentTime);
+        gain.gain.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + duration);
+        osc.connect(gain);
+        gain.connect(audioCtx.destination);
+        osc.start();
+        osc.stop(audioCtx.currentTime + duration);
+    } catch(e){}
+}
+
+// 게임 상태 관리
+const STATES = { TITLE: 0, STAGE1: 1, STAGE2: 2, STAGE3: 3, CLEAR: 4, GAMEOVER: 5 };
+let currentState = STATES.TITLE;
+
+let lives = 3;
+let blinkTimer = 0;
+let showPressStart = true;
+
+const player = { x: 180, y: 400, size: 20, speed: 4 };
+
+let s1_timer = 5;
+let s1_subwayArrived = false;
+let s1_doorOpen = false;
+let s1_goodDoorX = 180;
+
+let s3_bossWatching = false;
+let s3_bossTimer = 0;
+
+const keys = {};
+
+function initAudio() {
+    if (!audioCtx) {
+        audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    }
+}
+
+function triggerAction() {
+    initAudio();
+
+    if (currentState === STATES.TITLE) {
+        playSound(440, 0.1);
+        playSound(880, 0.2);
+        startStage1();
+        return;
+    }
+
+    if (currentState === STATES.GAMEOVER || currentState === STATES.CLEAR) {
+        lives = 3;
+        startStage1();
+        return;
+    }
+
+    if (currentState === STATES.STAGE1) {
+        if (s1_doorOpen) {
+            if (Math.abs(player.x - s1_goodDoorX) < 50) {
+                playSound(523, 0.1);
+                playSound(659, 0.2);
+                startStage2();
+            } else {
+                lives--;
+                playSound(150, 0.3, 'sawtooth');
+                if (lives <= 0) currentState = STATES.GAMEOVER;
+                else startStage1();
+            }
+        }
+    }
+}
+
+function startStage1() {
+    currentState = STATES.STAGE1;
+    player.x = 180;
+    player.y = 400;
+    s1_timer = 5;
+    s1_subwayArrived = false;
+    s1_doorOpen = false;
+}
+
+function startStage2() {
+    currentState = STATES.STAGE2;
+    player.x = 180;
+    player.y = 420;
+}
+
+function startStage3() {
+    currentState = STATES.STAGE3;
+    player.x = 180;
+    player.y = 420;
+    s3_bossWatching = false;
+    s3_bossTimer = 0;
+}
+
+let lastTime = performance.now();
+function gameLoop(now) {
+    const delta = (now - lastTime) / 1000;
+    lastTime = now;
+
+    update(delta);
+    render();
+
+    requestAnimationFrame(gameLoop);
+}
+
+function update(delta) {
+    if (currentState === STATES.TITLE) {
+        blinkTimer += delta;
+        if (blinkTimer > 0.4) {
+            showPressStart = !showPressStart;
+            blinkTimer = 0;
+        }
+        return;
+    }
+
+    if (currentState === STATES.STAGE1) {
+        s1_timer -= delta;
+        if (s1_timer <= 0 && !s1_subwayArrived) {
+            s1_subwayArrived = true;
+            s1_doorOpen = true;
+            s1_timer = 5;
+            playSound(300, 0.2);
+        } else if (s1_subwayArrived && s1_timer <= 0) {
+            lives--;
+            playSound(150, 0.4, 'sawtooth');
+            if (lives <= 0) currentState = STATES.GAMEOVER;
+            else startStage1();
+        }
+
+        if (keys['ArrowLeft']) player.x = Math.max(30, player.x - player.speed);
+        if (keys['ArrowRight']) player.x = Math.min(330, player.x + player.speed);
+    }
+
+    else if (currentState === STATES.STAGE2) {
+        if (keys['ArrowLeft']) player.x = Math.max(30, player.x - player.speed);
+        if (keys['ArrowRight']) player.x = Math.min(330, player.x + player.speed);
+        if (keys['ArrowUp']) player.y = Math.max(40, player.y - player.speed);
+        if (keys['ArrowDown']) player.y = Math.min(430, player.y + player.speed);
+
+        if (player.y <= 60 && player.x >= 110 && player.x <= 250) {
+            playSound(523, 0.1);
+            playSound(659, 0.2);
+            startStage3();
+        }
+    }
+
+    else if (currentState === STATES.STAGE3) {
+        s3_bossTimer += delta;
+        if (s3_bossTimer > 1.8) {
+            s3_bossWatching = !s3_bossWatching;
+            s3_bossTimer = 0;
+            if (s3_bossWatching) playSound(800, 0.1, 'sawtooth');
+        }
+
+        let isMoving = false;
+        if (keys['ArrowLeft']) { player.x = Math.max(30, player.x - player.speed); isMoving = true; }
+        if (keys['ArrowRight']) { player.x = Math.min(330, player.x + player.speed); isMoving = true; }
+        if (keys['ArrowUp']) { player.y = Math.max(40, player.y - player.speed); isMoving = true; }
+        if (keys['ArrowDown']) { player.y = Math.min(430, player.y + player.speed); isMoving = true; }
+
+        if (s3_bossWatching && isMoving) {
+            lives--;
+            playSound(120, 0.4, 'sawtooth');
+            if (lives <= 0) currentState = STATES.GAMEOVER;
+            else startStage3();
+        }
+
+        if (player.y <= 70 && player.x >= 130 && player.x <= 230) {
+            playSound(523, 0.1);
+            playSound(659, 0.1);
+            playSound(783, 0.3);
+            currentState = STATES.CLEAR;
+        }
+    }
+}
+
+function render() {
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+    // 1. 타이틀 화면
+    if (currentState === STATES.TITLE) {
+        if (isImgLoaded) {
+            ctx.drawImage(titleImg, 0, 0, canvas.width, canvas.height);
+        } else {
+            ctx.fillStyle = "#1e1b26";
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+            ctx.fillStyle = "#ff4444";
+            ctx.font = "bold 24px sans-serif";
+            ctx.textAlign = "center";
+            ctx.fillText("오늘도 출근이다", 180, 200);
+        }
+
+        if (showPressStart) {
+            ctx.fillStyle = "#ffff00";
+            ctx.font = "bold 16px sans-serif";
+            ctx.textAlign = "center";
+            ctx.shadowColor = "#000";
+            ctx.shadowBlur = 6;
+            ctx.fillText("PRESS THE BUTTON TO START", 180, 410);
+            ctx.shadowBlur = 0;
+        }
+        return;
+    }
+
+    // HUD
+    ctx.fillStyle = "#fff";
+    ctx.font = "bold 14px monospace";
+    ctx.textAlign = "left";
+    let hearts = "";
+    for(let i=0; i<lives; i++) hearts += "♥ ";
+    ctx.fillText(`LIFE: ${hearts}`, 15, 25);
+    ctx.textAlign = "right";
+    ctx.fillText(`STAGE ${currentState}`, 345, 25);
+
+    // 2. STAGE 1
+    if (currentState === STATES.STAGE1) {
+        ctx.fillStyle = "#333";
+        ctx.fillRect(0, 150, 360, 200);
+
+        if (s1_doorOpen) {
+            ctx.fillStyle = "#882222";
+            ctx.fillRect(20, 170, 100, 150);
+            ctx.fillRect(240, 170, 100, 150);
+            ctx.fillStyle = "#fff"; ctx.font = "12px sans-serif"; ctx.textAlign = "center";
+            ctx.fillText("만석!", 70, 240); ctx.fillText("만석!", 290, 240);
+
+            ctx.fillStyle = "#228822";
+            ctx.fillRect(130, 170, 100, 150);
+            ctx.fillStyle = "#fff"; ctx.font = "bold 14px sans-serif";
+            ctx.fillText("여유! (탑승)", 180, 240);
+        } else {
+            ctx.fillStyle = "#ffff00";
+            ctx.font = "16px sans-serif";
+            ctx.textAlign = "center";
+            ctx.fillText(`열차 도착까지: ${Math.ceil(s1_timer)}초`, 180, 250);
+        }
+
+        ctx.fillStyle = "#aaa";
+        ctx.font = "12px sans-serif";
+        ctx.textAlign = "center";
+        ctx.fillText(s1_doorOpen ? "여유 칸(초록색) 이동 후 [ACTION]!" : "열차가 도착할 때까지 기다리세요!", 180, 100);
+
+        ctx.fillStyle = "#00ffff";
+        ctx.fillRect(player.x - 10, player.y - 10, 20, 20);
+    }
+
+    // 3. STAGE 2
+    else if (currentState === STATES.STAGE2) {
+        ctx.fillStyle = "#228822";
+        ctx.fillRect(110, 35, 140, 35);
+        ctx.fillStyle = "#fff"; ctx.font = "bold 13px sans-serif"; ctx.textAlign = "center";
+        ctx.fillText("EXIT (하차문)", 180, 57);
+
+        ctx.fillStyle = "#666";
+        ctx.fillRect(40, 140, 120, 40);
+        ctx.fillRect(200, 220, 120, 40);
+        ctx.fillRect(80, 310, 120, 40);
+
+        ctx.fillStyle = "#aaa"; ctx.font = "12px sans-serif";
+        ctx.fillText("승객들을 피해 맨 위 출구로 탈출하세요!", 180, 100);
+
+        ctx.fillStyle = "#00ffff";
+        ctx.fillRect(player.x - 10, player.y - 10, 20, 20);
+    }
+
+    // 4. STAGE 3
+    else if (currentState === STATES.STAGE3) {
+        ctx.fillStyle = "#ffff00";
+        ctx.fillRect(130, 40, 100, 35);
+        ctx.fillStyle = "#000"; ctx.font = "bold 13px sans-serif"; ctx.textAlign = "center";
+        ctx.fillText("내 자리", 180, 62);
+
+        ctx.fillStyle = s3_bossWatching ? "#ff2222" : "#22aa22";
+        ctx.fillRect(20, 100, 320, 30);
+        ctx.fillStyle = "#fff"; ctx.font = "bold 13px sans-serif";
+        ctx.fillText(s3_bossWatching ? "👀 부장님이 감시 중! (얼음!)" : "📁 부장님이 서류 보는 중 (이동 가능)", 180, 120);
+
+        ctx.fillStyle = "#00ffff";
+        ctx.fillRect(player.x - 10, player.y - 10, 20, 20);
+    }
+
+    // 5. GAME OVER / CLEAR
+    else if (currentState === STATES.GAMEOVER) {
+        ctx.fillStyle = "#ff3333";
+        ctx.font = "bold 24px sans-serif";
+        ctx.textAlign = "center";
+        ctx.fillText("GAME OVER", 180, 210);
+        ctx.font = "14px sans-serif";
+        ctx.fillText("지각입니다! 사직서를 내세요.", 180, 250);
+        ctx.fillText("[START] 눌러 다시 시작", 180, 310);
+    }
+    else if (currentState === STATES.CLEAR) {
+        ctx.fillStyle = "#33ff33";
+        ctx.font = "bold 24px sans-serif";
+        ctx.textAlign = "center";
+        ctx.fillText("★ 출근 성공 ★", 180, 210);
+        ctx.font = "14px sans-serif";
+        ctx.fillText("오늘도 무사히 착석 완료!", 180, 250);
+        ctx.fillText("[START] 눌러 처음으로", 180, 310);
+    }
+}
+
+// 키 이벤트
+window.addEventListener('keydown', (e) => {
+    keys[e.code] = true;
+    if (e.code === 'Space' || e.code === 'Enter') triggerAction();
+    else if (currentState === STATES.TITLE) triggerAction();
+});
+window.addEventListener('keyup', (e) => { keys[e.code] = false; });
+
+const bindBtn = (id, keyName) => {
+    const el = document.getElementById(id);
+    const startPress = (e) => { e.preventDefault(); keys[keyName] = true; if(currentState === STATES.TITLE) triggerAction(); };
+    const endPress = (e) => { e.preventDefault(); keys[keyName] = false; };
+    el.addEventListener('touchstart', startPress);
+    el.addEventListener('touchend', endPress);
+    el.addEventListener('mousedown', startPress);
+    el.addEventListener('mouseup', endPress);
+};
+
+bindBtn('btn-left', 'ArrowLeft');
+bindBtn('btn-right', 'ArrowRight');
+bindBtn('btn-up', 'ArrowUp');
+bindBtn('btn-down', 'ArrowDown');
+
+document.getElementById('btn-action').addEventListener('click', () => { triggerAction(); });
+canvas.addEventListener('click', () => { triggerAction(); });
+
+requestAnimationFrame(gameLoop);
+</script>
+</body>
+</html>
